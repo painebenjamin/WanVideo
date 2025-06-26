@@ -1,0 +1,19 @@
+[project]
+name = "wanvideo"
+version = "0.1.0"
+description = "Wan2.1 Video Diffusion Model"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "diffusers",
+    "einops",
+    "numpy",
+    "protobuf",
+    "sentencepiece",
+    "torch",
+    "torchvision",
+    "transformers",
+]
+
+[tool.mypy]
+disable_error_code = ["misc"]
