@@ -14,7 +14,7 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from huggingface_hub import snapshot_download
 from transformers import T5Tokenizer  # type: ignore[import-untyped]
 
-from .models import T5Encoder, WanModel, WanVideoVAE, XLMRobertaCLIP
+from .modules import T5Encoder, WanModel, WanVideoVAE, XLMRobertaCLIP
 from .schedulers import FlowMatchUniPCMultistepScheduler
 from .utils import (
     get_optimized_cfg_alpha,
@@ -64,6 +64,10 @@ class WanPipeline(DiffusionPipeline):
         device: torch.device | str | int | None = None,
         dtype: torch.dtype | str | None = None,
         use_progress_bar: bool = True,
+        tokenizer_subfolder: str = "google/umt5-xxl",
+        t5_weights_filename: str = "models_t5_umt5-xxl-enc-bf16.pth",
+        vae_weights_filename: str = "Wan2.1_VAE.pth",
+        clip_weights_filename: str = "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
     ) -> WanPipeline:
         """
         Load the pipeline from a pretrained model repository.
@@ -74,19 +78,36 @@ class WanPipeline(DiffusionPipeline):
         repo_path = snapshot_download(
             repo_id,
             allow_patterns=[
-                "models_t5_umt5-xxl-enc-bf16.pth",  # t5
-                "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",  # clip
-                "Wan2.1_VAE.pth",  # vae
-                "config.json",  # for transformer
-                "diffusion_pytorch_model*.safetensors",  # transformer
-                "google/*",  # t5 tokenizer
+                t5_weights_filename,  # t5
+                clip_weights_filename,  # clip
+                vae_weights_filename,  # vae
+                f"{tokenizer_subfolder}/*",  # tokenizer
+                "config.json",  # transformer
+                "diffusion_pytorch_model*.safetensors*",  # transformer
             ],
         )
+
+        vae_weights_path = os.path.join(repo_path, vae_weights_filename)
+        t5_weights_path = os.path.join(repo_path, t5_weights_filename)
+        clip_weights_path = os.path.join(repo_path, clip_weights_filename)
+
+        assert os.path.exists(
+            vae_weights_path
+        ), f"VAE weights file {vae_weights_filename} not found in {repo_path}."
+        assert os.path.exists(
+            t5_weights_path
+        ), f"T5 weights file {t5_weights_filename} not found in {repo_path}."
+
+        is_i2v = os.path.exists(clip_weights_path)
+        total_components = 6 if is_i2v else 5
+
         if use_progress_bar:
             try:
                 from tqdm import tqdm
 
-                progress_bar = tqdm(desc="Loading Components", total=5)
+                progress_bar = tqdm(
+                    desc="Loading pipeline components", total=total_components
+                )
             except ImportError:
                 logger.warning(
                     "tqdm is not installed. Progress bar will not be shown. "
@@ -98,38 +119,49 @@ class WanPipeline(DiffusionPipeline):
         dtype = get_torch_dtype(dtype)
 
         vae = WanVideoVAE.from_single_file(
-            os.path.join(repo_path, "Wan2.1_VAE.pth"),
+            vae_weights_path,
             device=device,
         )
 
-        if progress_bar:
-            progress_bar.update(1)
-
-        tokenizer = T5Tokenizer.from_pretrained(
-            repo_path,
-            subfolder="google/umt5-xxl",
-            legacy=True,
-        )
-        if progress_bar:
-            progress_bar.update(1)
-
-        text_encoder = T5Encoder.from_single_file(
-            os.path.join(repo_path, "models_t5_umt5-xxl-enc-bf16.pth"),
-            device=device,
-            dtype=dtype,
-        )
         if progress_bar:
             progress_bar.update(1)
 
         transformer = WanModel.from_pretrained(
             repo_path,
-            device=device,
             torch_dtype=dtype,
             low_cpu_mem_usage=False,
         ).to(device)
 
         if progress_bar:
             progress_bar.update(1)
+
+        tokenizer = T5Tokenizer.from_pretrained(
+            repo_path,
+            subfolder=tokenizer_subfolder,
+            legacy=True,
+        )
+        if progress_bar:
+            progress_bar.update(1)
+
+        text_encoder = T5Encoder.from_single_file(
+            t5_weights_path,
+            device=device,
+            dtype=dtype,
+        )
+        if progress_bar:
+            progress_bar.update(1)
+
+        if is_i2v:
+            image_encoder = XLMRobertaCLIP.from_single_file(
+                clip_weights_path,
+                device=device,
+                dtype=torch.float16,
+            )
+            image_encoder.to(device, dtype=torch.float16)
+            if progress_bar:
+                progress_bar.update(1)
+        else:
+            image_encoder = None
 
         scheduler = FlowMatchUniPCMultistepScheduler(
             shift=1,
@@ -142,6 +174,7 @@ class WanPipeline(DiffusionPipeline):
 
         return cls(
             text_encoder=text_encoder,
+            image_encoder=image_encoder,
             tokenizer=tokenizer,
             transformer=transformer,
             vae=vae,
@@ -159,6 +192,66 @@ class WanPipeline(DiffusionPipeline):
         """
         return cls.from_original_pretrained(
             "Wan-AI/Wan2.1-T2V-1.3B",
+            device=device,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def from_original_t2v_large_pretrained(
+        cls,
+        device: torch.device | str | int | None = None,
+        dtype: torch.dtype | str | None = None,
+    ) -> WanPipeline:
+        """
+        Loads the original T2V 14B model.
+        """
+        return cls.from_original_pretrained(
+            "Wan-AI/Wan2.1-T2V-14B",
+            device=device,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def from_original_i2v_480p_pretrained(
+        cls,
+        device: torch.device | str | int | None = None,
+        dtype: torch.dtype | str | None = None,
+    ) -> WanPipeline:
+        """
+        Loads the original I2V 14B 480p model.
+        """
+        return cls.from_original_pretrained(
+            "Wan-AI/Wan2.1-I2V-14B-480p",
+            device=device,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def from_original_i2v_720p_pretrained(
+        cls,
+        device: torch.device | str | int | None = None,
+        dtype: torch.dtype | str | None = None,
+    ) -> WanPipeline:
+        """
+        Loads the original I2V 14B 720p model.
+        """
+        return cls.from_original_pretrained(
+            "Wan-AI/Wan2.1-I2V-14B-720p",
+            device=device,
+            dtype=dtype,
+        )
+
+    @classmethod
+    def from_original_flf2v_720p_pretrained(
+        cls,
+        device: torch.device | str | int | None = None,
+        dtype: torch.dtype | str | None = None,
+    ) -> WanPipeline:
+        """
+        Loads the original FLF2V 14B 720p model.
+        """
+        return cls.from_original_pretrained(
+            "Wan-AI/Wan2.1-FLF2V-14B-720p",
             device=device,
             dtype=dtype,
         )
@@ -306,6 +399,8 @@ class WanPipeline(DiffusionPipeline):
         latents: list[torch.Tensor],
         cond: list[torch.Tensor],
         uncond: list[torch.Tensor] | None,
+        y: list[torch.Tensor] | None,
+        clip_fea: torch.Tensor | None,
         window_size: int | None,
         window_stride: int | None,
         tile_size: int | tuple[int, int] | None,
@@ -561,10 +656,20 @@ class WanPipeline(DiffusionPipeline):
 
                 if do_classifier_free_guidance and uncond is not None:
                     noise_pred_cond = self.transformer(
-                        latent_model_input, t=timestep, context=cond, seq_len=seq_len
+                        latent_model_input,
+                        t=timestep,
+                        context=cond,
+                        seq_len=seq_len,
+                        y=y,
+                        clip_fea=clip_fea,
                     )[0]
                     noise_pred_uncond = self.transformer(
-                        latent_model_input, t=timestep, context=uncond, seq_len=seq_len
+                        latent_model_input,
+                        t=timestep,
+                        context=uncond,
+                        seq_len=seq_len,
+                        y=y,
+                        clip_fea=clip_fea,
                     )[0]
 
                     if use_cfg_alpha:
@@ -582,7 +687,12 @@ class WanPipeline(DiffusionPipeline):
                         )
                 else:
                     noise_pred = self.transformer(
-                        latent_model_input, t=timestep, context=cond, seq_len=seq_len
+                        latent_model_input,
+                        t=timestep,
+                        context=cond,
+                        seq_len=seq_len,
+                        y=y,
+                        clip_fea=clip_fea,
                     )[0]
 
                 window_mask = torch.ones_like(noise_pred)
@@ -865,10 +975,20 @@ class WanPipeline(DiffusionPipeline):
 
             if do_classifier_free_guidance and uncond is not None:
                 noise_pred_cond = self.transformer(
-                    latent_model_input, t=timestep, context=cond, seq_len=seq_len
+                    latent_model_input,
+                    t=timestep,
+                    context=cond,
+                    seq_len=seq_len,
+                    y=y,
+                    clip_fea=clip_fea,
                 )[0]
                 noise_pred_uncond = self.transformer(
-                    latent_model_input, t=timestep, context=uncond, seq_len=seq_len
+                    latent_model_input,
+                    t=timestep,
+                    context=uncond,
+                    seq_len=seq_len,
+                    y=y,
+                    clip_fea=clip_fea,
                 )[0]
 
                 if use_cfg_alpha:
@@ -886,22 +1006,28 @@ class WanPipeline(DiffusionPipeline):
                     )
             else:
                 noise_pred = self.transformer(
-                    latent_model_input, t=timestep, context=cond, seq_len=seq_len
+                    latent_model_input,
+                    t=timestep,
+                    context=cond,
+                    seq_len=seq_len,
+                    y=y,
+                    clip_fea=clip_fea,
                 )[0]
 
         return noise_pred  # type: ignore[no-any-return]
 
-    @torch.inference_mode()
     def __call__(
         self,
         prompt: str,
         negative_prompt: str | None = None,
         num_frames: int = 81,
-        width: int = 832,
-        height: int = 480,
+        width: int = 832,  # For T2V
+        height: int = 480,  # For T2V
         shift: float = 5.0,
-        video: torch.Tensor | None = None,
-        strength: float = 0.6,
+        video: torch.Tensor | None = None,  # For V2V
+        strength: float = 0.6,  # For V2V
+        first_frame: torch.Tensor | None = None,  # For I2V or FLF2V
+        last_frame: torch.Tensor | None = None,  # For FLF2V
         use_cfg_alpha: bool = False,
         num_zero_steps: int = 0,
         guidance_scale: float = 5.0,
@@ -947,14 +1073,49 @@ class WanPipeline(DiffusionPipeline):
                 num_frames, _, height, width = video.shape
 
         encoded_video: torch.Tensor | None = None
+        encoded_features: torch.Tensor | None = None
+        encoded_condition: torch.Tensor | None = None
+        encoded_shape: tuple[int, int, int, int] | None = None
 
+        # Encode frames
+        if first_frame is not None:
+            assert first_frame.ndim == 3, "First frame must be a 3D tensor [C, H, W]."
+            assert self.image_encoder is not None, "Pipeline not configured for I2V."
+
+            if first_frame.min() >= 0 and first_frame.max() <= 1:
+                first_frame = first_frame.sub_(0.5).div_(0.5)  # Normalize to [-1, 1]
+
+            height, width = first_frame.shape[1:]
+
+            if last_frame is not None:
+                assert (
+                    first_frame.shape == last_frame.shape
+                ), "First and last frames must have the same shape."
+                if last_frame.min() >= 0 and last_frame.max() <= 1:
+                    last_frame = last_frame.sub_(0.5).div_(0.5)
+
+                encoded_features = self.image_encoder.infer_videos(
+                    [
+                        first_frame[:, None, :, :],
+                        last_frame[:, None, :, :],
+                    ]
+                )
+            else:
+                encoded_features = self.image_encoder.infer_videos(
+                    [
+                        first_frame[:, None, :, :],
+                    ]
+                )
+
+        # Encode video
         if video is not None:
+            assert video.ndim == 4, "Video must be a 4D tensor [T, C, H, W]."
             if loop and flash_fix:
                 # Prepend first 15 frames in reverse to avoid VAE warmup flash
                 video = torch.cat([torch.flip(video[:15], [0]), video], dim=0)
 
             with log_duration("encoding video"):
-                encoded_video = self.vae.encode(
+                encoded_video = self.vae.encode_video(
                     [video.permute(1, 0, 2, 3).to(self.device, dtype=self.dtype)],
                     tiled=tile_vae,
                     device=self.device,
@@ -963,8 +1124,9 @@ class WanPipeline(DiffusionPipeline):
             if loop and flash_fix:
                 encoded_video = encoded_video[:, 4:]
 
-            encoded_shape = encoded_video.shape
-        else:
+            encoded_shape = encoded_video.shape  # type: ignore[assignment]
+
+        if encoded_shape is None:
             encoded_shape = self.vae.get_target_shape(  # type: ignore[assignment]
                 num_frames=num_frames,
                 height=height,
@@ -974,6 +1136,69 @@ class WanPipeline(DiffusionPipeline):
         e_d, e_t, e_h, e_w = encoded_shape
         p_t, p_h, p_w = self.transformer.patch_size
         seq_len = ceil((e_h * e_w) / (p_h * p_w) * e_t)
+
+        # Prepare additional conditioning
+        if encoded_features is not None:
+            mask = torch.ones(1, 81, e_h, e_w, device=self.device)
+
+            if last_frame is None:
+                mask[:, 1:] = 0
+            else:
+                mask[:, 1:-1] = 0
+
+            mask = torch.concat(
+                [
+                    torch.repeat_interleave(
+                        mask[:, 0:1],
+                        repeats=4,
+                        dim=1,
+                    ),
+                    mask[:, 1:],
+                ],
+                dim=1,
+            )
+            mask = mask.view(1, mask.shape[1] // 4, 4, e_h, e_w)
+            mask = mask.transpose(1, 2)[0]
+
+            condition_videos = [
+                torch.nn.functional.interpolate(
+                    first_frame[None].cpu(),  # type: ignore[index]
+                    size=(height, width),
+                    mode="bicubic",
+                    align_corners=False,
+                ).transpose(0, 1),
+            ]
+
+            if last_frame is None:
+                condition_videos.append(
+                    torch.zeros(3, num_frames - 1, height, width),
+                )
+            else:
+                condition_videos.append(
+                    torch.zeros(3, num_frames - 2, height, width),
+                )
+                condition_videos.append(
+                    torch.nn.functional.interpolate(
+                        last_frame[None].cpu(),
+                        size=(height, width),
+                        mode="bicubic",
+                        align_corners=False,
+                    ).transpose(0, 1),
+                )
+
+            condition_video = torch.concat(condition_videos, dim=1)
+
+            encoded_condition = self.vae.encode_video(
+                [condition_video],
+                tiled=tile_vae,
+                device=self.device,
+            )[0]
+            encoded_condition = torch.concat(
+                [
+                    mask,
+                    encoded_condition,
+                ]
+            )
 
         if guidance_end is None:
             guidance_end = 1.0
@@ -1020,6 +1245,7 @@ class WanPipeline(DiffusionPipeline):
         )
 
         if encoded_video is not None and strength is not None:
+            # Scale timesteps based on strength
             timesteps, num_inference_steps = self.get_strength_adjusted_timesteps(
                 num_inference_steps=num_inference_steps,
                 strength=strength,
@@ -1028,7 +1254,6 @@ class WanPipeline(DiffusionPipeline):
         guidance_end_step = int(guidance_end * num_inference_steps) - 1
 
         # Encode prompts
-
         with log_duration("encoding prompt"):
             cond = [self.encode_prompt(prompt).to(self.dtype)]
 
@@ -1042,6 +1267,7 @@ class WanPipeline(DiffusionPipeline):
         else:
             uncond = None
 
+        # Create noise
         noise = make_noise(
             batch_size=1,
             channels=e_d,
@@ -1061,7 +1287,7 @@ class WanPipeline(DiffusionPipeline):
             sync_context = nullcontext  # type: ignore[assignment]
 
         # Denoising loop
-        with amp.autocast("cuda", dtype=self.dtype), torch.no_grad(), sync_context():  # type: ignore[attr-defined,operator]
+        with amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad(), sync_context():  # type: ignore[attr-defined,operator]
             if encoded_video is not None:
                 latents = [
                     self.scheduler.add_noise(  # type: ignore[attr-defined]
@@ -1087,6 +1313,12 @@ class WanPipeline(DiffusionPipeline):
                         latents=latents,
                         cond=cond,
                         uncond=uncond,
+                        clip_fea=encoded_features,
+                        y=(
+                            [encoded_condition]
+                            if encoded_condition is not None
+                            else None
+                        ),
                         window_size=window_size,
                         window_stride=window_stride,
                         tile_size=tile_size,
@@ -1120,7 +1352,7 @@ class WanPipeline(DiffusionPipeline):
                 # in the repeated frames with the original frames.
                 latents = [torch.cat([l, l[:, :4]], dim=1) for l in latents]
 
-            videos = self.vae.decode(
+            videos = self.vae.decode_video(
                 latents,
                 device=self.device,
                 tiled=tile_vae,

@@ -5,6 +5,7 @@ import math
 from typing import Literal
 
 import torch
+import torch.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T  # type: ignore[import-untyped]
@@ -93,7 +94,7 @@ class SelfAttention(nn.Module):
 
         # compute attention
         p = self.attn_dropout if self.training else 0.0
-        x = attention(q, k, v, dropout_p=p, causal=self.causal, version=2)
+        x = attention(q, k, v, dropout_p=p, causal=self.causal, version=2).type_as(x)
         x = x.reshape(b, s, c)
 
         # output
@@ -215,7 +216,7 @@ class AttentionPool(nn.Module):
         dim: int,
         mlp_ratio: float,
         num_heads: int,
-        activation: Literal["quick_gelu", "gelu"] = "quick_gelu",
+        activation: Literal["quick_gelu", "gelu"] = "gelu",
         proj_dropout: float = 0.0,
         norm_eps: float = 1e-5,
     ) -> None:
@@ -376,7 +377,7 @@ class VisionTransformer(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-        self.post_norm = LayerNorm(dim, eps=norm_eps) if post_norm else None
+        self.post_norm = LayerNorm(dim, eps=norm_eps)
 
         # head
         if pool_type == "token":
@@ -401,6 +402,7 @@ class VisionTransformer(nn.Module):
 
         # embeddings
         x = self.patch_embedding(x).flatten(2).permute(0, 2, 1)
+
         if self.pool_type in ("token", "token_fc"):
             x = torch.cat([self.cls_embedding.expand(b, -1, -1), x], dim=1)
         if interpolation:
@@ -421,7 +423,14 @@ class VisionTransformer(nn.Module):
             return x
 
 
-class XLMRobertaCLIP(ConfigMixin, PretrainedMixin, ModelMixin):
+class XLMRobertaCLIP(PretrainedMixin, ModelMixin, ConfigMixin):
+    """
+    XLM-RoBERTa + CLIP model.
+    This model combines a vision transformer for image feature extraction
+    and an XLM-RoBERTa model for text feature extraction.
+    """
+    config_name = "config"  # type: ignore[assignment]
+
     @register_to_config
     def __init__(
         self,
@@ -571,7 +580,7 @@ class XLMRobertaCLIP(ConfigMixin, PretrainedMixin, ModelMixin):
         ]
         return groups
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def infer_videos(
         self,
         videos: list[torch.Tensor],
@@ -589,15 +598,19 @@ class XLMRobertaCLIP(ConfigMixin, PretrainedMixin, ModelMixin):
         videos_tensor = torch.cat(
             [
                 F.interpolate(
-                    u.transpose(0, 1), size=size, mode="bicubic", align_corners=False
+                    u.transpose(0, 1),
+                    size=size,
+                    mode="bicubic",
+                    align_corners=False,
                 )
                 for u in videos
             ]
         )
-        videos_tensor = T.normalize(mean=mean, std=std)(
+        videos_tensor = T.Normalize(mean=mean, std=std)(
             videos_tensor.mul_(0.5).add_(0.5)
         )
 
         # forward
-        videos_tensor = self.visual(videos_tensor, use_31_block=True)
-        return videos_tensor
+        with amp.autocast("cuda", enabled=True, dtype=torch.float16):
+            videos_tensor = self.visual(videos_tensor, use_31_block=True)
+            return videos_tensor

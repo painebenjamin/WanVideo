@@ -12,7 +12,7 @@ from typing_extensions import Literal
 
 from ..utils import attention
 
-WAN_MODEL_TYPE_LITERAL = Literal["t2v", "i2v"]
+WAN_MODEL_TYPE_LITERAL = Literal["t2v", "i2v", "flf2v", "vace"]
 
 __all__ = ["WanModel"]
 
@@ -276,9 +276,9 @@ def get_wan_crossattention_class(model_type: WAN_MODEL_TYPE_LITERAL) -> Type[nn.
     :param cross_attn_type: The type of cross-attention module.
     :return: The cross-attention module.
     """
-    if model_type == "t2v":
+    if model_type in ["t2v", "vace"]:
         return WanT2VCrossAttention
-    elif model_type == "i2v":
+    elif model_type in ["i2v", "flf2v"]:
         return WanI2VCrossAttention
     else:
         raise ValueError(f"Invalid cross-attention type: {model_type}")
@@ -503,7 +503,7 @@ class WanModel(ModelMixin, ConfigMixin):
         """
         super().__init__()
 
-        assert model_type in ["t2v", "i2v"]
+        assert model_type in ["t2v", "i2v", "flf2v", "vace"]
         self.model_type = model_type
 
         self.patch_size = patch_size
@@ -565,7 +565,7 @@ class WanModel(ModelMixin, ConfigMixin):
             dim=1,
         )
 
-        if model_type == "i2v":
+        if model_type in ["i2v", "flf2v"]:
             self.img_emb = MLPProj(in_dim=1280, out_dim=dim)
 
         if init_weights:
@@ -669,8 +669,10 @@ class WanModel(ModelMixin, ConfigMixin):
         :param y: The conditional video inputs for image-to-video mode.
         :return: The denoised video tensors with original input shapes [C_out, F, H / 8, W / 8].
         """
-        if self.model_type == "i2v":
+        if self.model_type in ["i2v", "flf2v"]:
             assert clip_fea is not None and y is not None
+        elif self.model_type == "t2v":
+            assert clip_fea is None and y is None
 
         # params
         device = self.patch_embedding.weight.device

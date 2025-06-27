@@ -1,22 +1,20 @@
 from __future__ import annotations
 
+from typing import Any, TypeVar
+
 import torch
 import torch.nn as nn
-
-from typing import Any, TypeVar
 from diffusers.models.model_loading_utils import load_state_dict
 
-from .torch_utils import (
-    no_init_weights,
-    get_torch_dtype,
-    get_torch_device,
-)
+from .torch_utils import get_torch_device, get_torch_dtype, no_init_weights
 
 __all__ = [
     "PretrainedMixin",
 ]
 
 T = TypeVar("T", bound=nn.Module)
+
+
 class PretrainedMixin(nn.Module):
     """
     A mixin class for loading pretrained models in PyTorch.
@@ -45,7 +43,7 @@ class PretrainedMixin(nn.Module):
             model = cls(**kwargs)
             model.load_state_dict(
                 load_state_dict(path),
-                strict=False,
+                strict=True,
             )
             model.to(
                 device=get_torch_device(device),

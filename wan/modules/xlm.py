@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["XLMRoberta"]
+__all__ = ["XLMRoberta", "XLMRobertaWithHead", "SelfAttention", "AttentionBlock"]
 
 
 class SelfAttention(nn.Module):

@@ -1,4 +1,5 @@
 from .attention_utils import attention, flash_attention  # noqa
+from .export_utils import write_video  # noqa
 from .import_utils import (  # noqa
     flash_attn_2_available,
     flash_attn_3_available,
@@ -55,5 +56,6 @@ __all__ = [
     "sliding_3d_windows",
     "torch_dtype_from_string",
     "tqdm_available",
+    "write_video",
     "PretrainedMixin",
 ]

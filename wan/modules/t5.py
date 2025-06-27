@@ -402,7 +402,7 @@ class T5Module(PretrainedMixin, ModelMixin, ConfigMixin):
         elif isinstance(m, T5Model):
             nn.init.normal_(m.token_embedding.weight, std=1.0)
         elif isinstance(m, T5FeedForward):
-            nn.init.normal_(m.gate[0].weight, std=m.dim**-0.5)
+            nn.init.normal_(m.gate[0].weight, std=m.dim**-0.5)  # type: ignore[arg-type]
             nn.init.normal_(m.fc1.weight, std=m.dim**-0.5)
             nn.init.normal_(m.fc2.weight, std=m.dim_ffn**-0.5)
         elif isinstance(m, T5Attention):

@@ -1,5 +1,5 @@
 [project]
-name = "wanvideo"
+name = "wan"
 version = "0.1.0"
 description = "Wan2.1 Video Diffusion Model"
 readme = "README.md"
@@ -13,6 +13,7 @@ dependencies = [
     "torch",
     "torchvision",
     "transformers",
+    "imageio[ffmpeg]",
 ]
 
 [tool.mypy]

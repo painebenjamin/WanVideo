@@ -9,7 +9,7 @@ from typing import Any, List, Optional, Sequence, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from diffusers.configuration_utils import ConfigMixin
+from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from einops import rearrange, repeat
 from typing_extensions import Literal
@@ -651,19 +651,18 @@ class Decoder3d(nn.Module):
         return x
 
 
-class WanVAE(PretrainedMixin, ModelMixin, ConfigMixin):
+class WanVAE(PretrainedMixin):
     """
     Video VAE model.
     """
-
     def __init__(
         self,
-        dim: int = 128,
-        z_dim: int = 4,
+        dim: int = 96,
+        z_dim: int = 16,
         dim_mult: list[int] = [1, 2, 4, 4],
         num_res_blocks: int = 2,
         attn_scales: list[float] = [],
-        temporal_downsample: list[bool] = [True, True, False],
+        temporal_downsample: list[bool] = [False, True, True],
         dropout: float = 0.0,
     ) -> None:
         """
@@ -827,16 +826,23 @@ class WanVAE(PretrainedMixin, ModelMixin, ConfigMixin):
         self._enc_feat_map = [None] * self.encoder_num_conv
 
 
-class WanVideoVAE(nn.Module):
+class WanVideoVAE(WanVAE, ModelMixin, ConfigMixin):
     """
     Video VAE model.
     """
 
     scale: tuple[torch.Tensor, torch.Tensor]
 
+    @register_to_config
     def __init__(
         self,
-        model: WanVAE,
+        dim: int = 96,
+        z_dim: int = 16,
+        dim_mult: list[int] = [1, 2, 4, 4],
+        num_res_blocks: int = 2,
+        attn_scales: list[float] = [],
+        temporal_downsample: list[bool] = [False, True, True],
+        dropout: float = 0.0,
         stride: tuple[int, int, int] = (4, 8, 8),
         mean: list[float] = [
             -0.7571,
@@ -887,79 +893,7 @@ class WanVideoVAE(nn.Module):
         :param mean: means
         :param std: stds
         """
-        super().__init__()
-        self.model = model
-        self.stride = stride
-        self.mean = torch.tensor(mean)
-        self.std = torch.tensor(std)
-        self.scale = (self.mean, 1.0 / self.std)
-        self.upsampling_factor = upsampling_factor
-
-    @classmethod
-    def from_single_file(
-        cls,
-        path: str,
-        device: torch.device | str | int | None = None,
-        dtype: torch.dtype | str | None = None,
-        dim: int = 96,
-        z_dim: int = 16,
-        dim_mult: list[int] = [1, 2, 4, 4],
-        num_res_blocks: int = 2,
-        attn_scales: list[float] = [],
-        temporal_downsample: list[bool] = [False, True, True],
-        dropout: float = 0.0,
-        stride: tuple[int, int, int] = (4, 8, 8),
-        mean: list[float] = [
-            -0.7571,
-            -0.7089,
-            -0.9113,
-            0.1075,
-            -0.1745,
-            0.9653,
-            -0.1517,
-            1.5508,
-            0.4134,
-            -0.0715,
-            0.5517,
-            -0.3632,
-            -0.1922,
-            -0.9497,
-            0.2503,
-            -0.2921,
-        ],
-        std: list[float] = [
-            2.8184,
-            1.4541,
-            2.3275,
-            2.6558,
-            1.2196,
-            1.7708,
-            2.6052,
-            2.0743,
-            3.2687,
-            2.1526,
-            2.8652,
-            1.5579,
-            1.6382,
-            1.1253,
-            2.8251,
-            1.9160,
-        ],
-        upsampling_factor: int = 8,
-        **kwargs: Any,
-    ) -> WanVideoVAE:
-        """
-        Load the model from a single file.
-        :param path: path to the model file
-        :param device: device to load the model to
-        :param dtype: data type to load the model with
-        :param kwargs: additional arguments
-        :return: WanVideoVAE instance
-        """
-        vae = WanVAE.from_single_file(
-            path,
-            device=device,
-            dtype=dtype,
+        super().__init__(
             dim=dim,
             z_dim=z_dim,
             dim_mult=dim_mult,
@@ -968,13 +902,11 @@ class WanVideoVAE(nn.Module):
             temporal_downsample=temporal_downsample,
             dropout=dropout,
         )
-        return cls(
-            model=vae,
-            stride=stride,
-            mean=mean,
-            std=std,
-            upsampling_factor=upsampling_factor,
-        )
+        self.stride = stride
+        self.mean = torch.tensor(mean)
+        self.std = torch.tensor(std)
+        self.scale = (self.mean, 1.0 / self.std)
+        self.upsampling_factor = upsampling_factor
 
     def get_target_shape(
         self, num_frames: int, height: int, width: int
@@ -988,7 +920,7 @@ class WanVideoVAE(nn.Module):
         :return: target shape [C, T, H, W]
         """
         return (
-            self.model.z_dim,
+            self.z_dim,
             (num_frames - 1) // self.stride[0] + 1,
             height // self.stride[1],
             width // self.stride[2],
@@ -1092,7 +1024,7 @@ class WanVideoVAE(nn.Module):
             hidden_states_batch = hidden_states[:, :, :, h:h_, w:w_].to(
                 computation_device
             )
-            hidden_states_batch = self.model.decode(
+            hidden_states_batch = self.decode(
                 hidden_states_batch, self.scale, loop
             ).to(data_device)
 
@@ -1176,7 +1108,7 @@ class WanVideoVAE(nn.Module):
             tasks, desc="VAE encoding", use_tqdm=use_tqdm
         ):
             hidden_states_batch = video[:, :, :, h:h_, w:w_].to(computation_device)
-            hidden_states_batch = self.model.encode(hidden_states_batch, self.scale).to(
+            hidden_states_batch = self.encode(hidden_states_batch, self.scale).to(
                 data_device
             )
 
@@ -1217,7 +1149,7 @@ class WanVideoVAE(nn.Module):
         :return: output tensor [B, C, T, H, W]
         """
         video = video.to(device)
-        x = self.model.encode(video, self.scale)
+        x = self.encode(video, self.scale)
         return x
 
     def single_decode(
@@ -1229,11 +1161,11 @@ class WanVideoVAE(nn.Module):
         :return: output tensor [B, C, T, H, W]
         """
         hidden_states = hidden_states.to(device)
-        video = self.model.decode(hidden_states, self.scale, loop)
+        video = self.decode(hidden_states, self.scale, loop)
         return video.float().clamp_(-1, 1)
 
     @torch.no_grad()
-    def encode(
+    def encode_video(
         self,
         videos: list[torch.Tensor],
         device: torch.device,
@@ -1265,7 +1197,7 @@ class WanVideoVAE(nn.Module):
         return torch.stack(hidden_states)
 
     @torch.no_grad()
-    def decode(
+    def decode_video(
         self,
         hidden_states: list[torch.Tensor],
         device: torch.device,
@@ -1284,7 +1216,7 @@ class WanVideoVAE(nn.Module):
         """
         hidden_states = [hidden_state.to("cpu") for hidden_state in hidden_states]
         videos = []
-        print(f"Decoding {len(hidden_states)} videos on {device}...")
+
         for hidden_state in hidden_states:
             hidden_state = hidden_state.unsqueeze(0)
             if tiled:

@@ -1,11 +1,10 @@
-from math import sqrt
 from collections.abc import Iterator
-from typing import Any
 from contextlib import contextmanager
+from math import sqrt
+from typing import Any
 
 import torch
 import torch.nn.functional as F
-
 
 __all__ = [
     "torch_dtype_from_string",
@@ -79,6 +78,7 @@ def get_torch_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
     else:
         raise TypeError(f"Expected str or torch.dtype, got {type(dtype)}")
 
+
 def get_torch_device(device: str | torch.device | None | int) -> torch.device:
     """
     Gets the torch device from a string or torch.device.
@@ -93,6 +93,7 @@ def get_torch_device(device: str | torch.device | None | int) -> torch.device:
         return device
     else:
         raise TypeError(f"Expected str, torch.device, int, or None, got {type(device)}")
+
 
 def finite_clamp(x: torch.Tensor, offset: float = 1e4) -> torch.Tensor:
     """
@@ -151,6 +152,7 @@ def pos_interpolate(pos: torch.Tensor, seq_len: int) -> torch.Tensor:
             ],
             dim=1,
         )
+
 
 @contextmanager
 def no_init_weights() -> Iterator[None]:

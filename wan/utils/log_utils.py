@@ -16,7 +16,7 @@ __all__ = [
     "reduce_units",
 ]
 
-logger = logging.getLogger("wanvideo")
+logger = logging.getLogger("wan")
 logger.setLevel(logging.WARNING)
 
 
