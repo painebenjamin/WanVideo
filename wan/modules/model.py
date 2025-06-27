@@ -437,7 +437,7 @@ class MLPProj(nn.Module):
     Multi-Layer Perceptron projection for image embeddings.
     """
 
-    def __init__(self, in_dim: int, out_dim: int) -> None:
+    def __init__(self, in_dim: int, out_dim: int, flf_pos_emb: bool = False) -> None:
         """
         :param in_dim: The input dimension.
         :param out_dim: The output dimension.
@@ -450,12 +450,23 @@ class MLPProj(nn.Module):
             torch.nn.Linear(in_dim, out_dim),
             torch.nn.LayerNorm(out_dim),
         )
+        if flf_pos_emb:
+            self.emb_pos = nn.Parameter(
+                torch.zeros(1, 257 * 2, 1280)
+            )  # 257 is the index of the FLF position embedding
+        else:
+            self.emb_pos = None
 
     def forward(self, image_embeds: torch.Tensor) -> torch.Tensor:
         """
         :param image_embeds: The input image embeddings with shape [B, C].
         :return: The projected image embeddings with shape [B, C].
         """
+        if self.emb_pos is not None:
+            bs, n, d = image_embeds.shape
+            image_embeds = image_embeds.view(-1, 2 * n, d)
+            image_embeds = image_embeds + self.emb_pos
+
         return self.proj(image_embeds)  # type: ignore[no-any-return]
 
 
@@ -566,7 +577,11 @@ class WanModel(ModelMixin, ConfigMixin):
         )
 
         if model_type in ["i2v", "flf2v"]:
-            self.img_emb = MLPProj(in_dim=1280, out_dim=dim)
+            self.img_emb = MLPProj(
+                in_dim=1280,
+                out_dim=dim,
+                flf_pos_emb=model_type == "flf2v",
+            )
 
         if init_weights:
             # initialize weights
