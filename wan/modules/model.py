@@ -187,26 +187,59 @@ class WanT2VCrossAttention(WanSelfAttention):
     """
 
     def forward(  # type: ignore[override]
-        self, x: torch.Tensor, context: torch.Tensor, context_lens: torch.Tensor
+        self, 
+        x: torch.Tensor, 
+        context: torch.Tensor, 
+        context_lens: torch.Tensor,
+        nag_scale: float = 1.0,
+        nag_tau: float = 2.5,
+        nag_alpha: float = 0.25,
     ) -> torch.Tensor:
         """
         :param x: The input tensor with shape [B, L1, C].
         :param context: The context tensor with shape [B, L2, C].
         :param context_lens: The context lengths for each sample with shape [B].
+        :param nag_scale: NAG scale parameter (default: 1.0).
+        :param nag_tau: NAG temperature parameter (default: 2.5).
+        :param nag_alpha: NAG alpha parameter (default: 0.25).
         :return: The tensor with shape [B, L1, C].
         """
         b, n, d = x.size(0), self.num_heads, self.head_dim
+
+        do_nag = nag_scale > 1.0
 
         # compute query, key, value
         q = self.norm_q(self.q(x)).view(b, -1, n, d)
         k = self.norm_k(self.k(context)).view(b, -1, n, d)
         v = self.v(context).view(b, -1, n, d)
 
+        if do_nag:
+            # normalized attention guidance adds a second key and value
+            k, k_1 = torch.chunk(k, 2, dim=0)
+            v, v_1 = torch.chunk(v, 2, dim=0)
+    
         # compute attention
         x = attention(q, k, v, k_lens=context_lens)
+        x = x.flatten(2)
+
+        if do_nag:
+            # compute attention with nag
+            x_1 = attention(q, k_1, v_1, k_lens=context_lens)
+            x_1 = x_1.flatten(2)
+            y = x * nag_scale - x_1 * (nag_scale - 1)
+            
+            n_x = torch.norm(x, p=1, dim=-1, keepdim=True).expand(*x.shape)
+            n_y = torch.norm(y, p=1, dim=-1, keepdim=True).expand(*y.shape)
+            n_t = nag_tau
+
+            # compute scale
+            s = n_x / n_y
+            s = torch.nan_to_num(s, 10)
+
+            y[s > n_t] = (y[s > n_t] / (n_y[s > n_t] + 1e-7) * n_x[s > n_t] * n_t).type_as(y)
+            x = y * nag_alpha + x * (1 - nag_alpha)
 
         # output
-        x = x.flatten(2)
         x = self.o(x)
         return x
 
@@ -239,17 +272,28 @@ class WanI2VCrossAttention(WanSelfAttention):
         self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
     def forward(  # type: ignore[override]
-        self, x: torch.Tensor, context: torch.Tensor, context_lens: torch.Tensor
+        self, 
+        x: torch.Tensor, 
+        context: torch.Tensor, 
+        context_lens: torch.Tensor,
+        nag_scale: float = 1.0,
+        nag_tau: float = 2.5,
+        nag_alpha: float = 0.25,
     ) -> torch.Tensor:
         """
         :param x: The input tensor with shape [B, L1, C].
         :param context: The context tensor with shape [B, L2, C].
         :param context_lens: The context lengths for each sample with shape [B].
+        :param nag_scale: NAG scale parameter (default: 1.0).
+        :param nag_tau: NAG temperature parameter (default: 2.5).
+        :param nag_alpha: NAG alpha parameter (default: 0.25).
         :return: The tensor with shape [B, L1, C].
         """
         context_img = context[:, :257]
         context = context[:, 257:]
         b, n, d = x.size(0), self.num_heads, self.head_dim
+
+        do_nag = nag_scale > 1.0
 
         # compute query, key, value
         q = self.norm_q(self.q(x)).view(b, -1, n, d)
@@ -257,13 +301,39 @@ class WanI2VCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
         k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
         v_img = self.v_img(context_img).view(b, -1, n, d)
+        
+        # Image attention (no NAG applied)
         img_x = attention(q, k_img, v_img, k_lens=None)
-        # compute attention
-        x = attention(q, k, v, k_lens=context_lens)
-
-        # output
-        x = x.flatten(2)
         img_x = img_x.flatten(2)
+        
+        # Text attention (with NAG if enabled)
+        if do_nag:
+            # normalized attention guidance adds a second key and value for text context only
+            k, k_1 = torch.chunk(k, 2, dim=0)
+            v, v_1 = torch.chunk(v, 2, dim=0)
+        
+        # compute text attention
+        x = attention(q, k, v, k_lens=context_lens)
+        x = x.flatten(2)
+
+        if do_nag:
+            # compute attention with nag for text context
+            x_1 = attention(q, k_1, v_1, k_lens=context_lens)
+            x_1 = x_1.flatten(2)
+            y = x * nag_scale - x_1 * (nag_scale - 1)
+            
+            n_x = torch.norm(x, p=1, dim=-1, keepdim=True).expand(*x.shape)
+            n_y = torch.norm(y, p=1, dim=-1, keepdim=True).expand(*y.shape)
+            n_t = nag_tau
+
+            # compute scale
+            s = n_x / n_y
+            s = torch.nan_to_num(s, 10)
+
+            y[s > n_t] = (y[s > n_t] / (n_y[s > n_t] + 1e-7) * n_x[s > n_t] * n_t).type_as(y)
+            x = y * nag_alpha + x * (1 - nag_alpha)
+
+        # output - combine text and image attention
         x = x + img_x
         x = self.o(x)
         return x
@@ -355,6 +425,9 @@ class WanAttentionBlock(nn.Module):
         freqs: torch.Tensor,
         context: torch.Tensor,
         context_lens: torch.Tensor,
+        nag_scale: float = 1.0,
+        nag_tau: float = 2.5,
+        nag_alpha: float = 0.25,
     ) -> torch.Tensor:
         """
         :param x: The input tensor with shape [B, L, C].
@@ -364,6 +437,9 @@ class WanAttentionBlock(nn.Module):
         :param freqs: The rope frequencies with shape [1024, C / num_heads / 2].
         :param context: The context tensor with shape [B, L2, C].
         :param context_lens: The context lengths for each sample with shape [B].
+        :param nag_scale: NAG scale parameter (default: 1.0).
+        :param nag_tau: NAG temperature parameter (default: 2.5).
+        :param nag_alpha: NAG alpha parameter (default: 0.25).
         :return: The tensor with shape [B, L, C].
         """
         with amp.autocast("cuda", dtype=torch.float32):  # type: ignore[attr-defined]
@@ -378,7 +454,14 @@ class WanAttentionBlock(nn.Module):
             x = x + y * e[2]
 
         # cross-attention & ffn function
-        x = x + self.cross_attn(self.norm3(x), context, context_lens)
+        x = x + self.cross_attn(
+            self.norm3(x), 
+            context, 
+            context_lens,
+            nag_scale=nag_scale,
+            nag_tau=nag_tau,
+            nag_alpha=nag_alpha,
+        )
         y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
 
         with amp.autocast("cuda", dtype=torch.float32):  # type: ignore[attr-defined]
@@ -672,6 +755,9 @@ class WanModel(ModelMixin, ConfigMixin):
         seq_len: int,
         clip_fea: Optional[torch.Tensor] = None,
         y: Optional[List[torch.Tensor]] = None,
+        nag_scale: float = 1.0,
+        nag_tau: float = 2.5,
+        nag_alpha: float = 0.25,
     ) -> List[torch.Tensor]:
         """
         Forward pass through the diffusion model
@@ -682,6 +768,9 @@ class WanModel(ModelMixin, ConfigMixin):
         :param seq_len: The maximum sequence length for positional encoding.
         :param clip_fea: The CLIP image features for image-to-video mode.
         :param y: The conditional video inputs for image-to-video mode.
+        :param nag_scale: NAG scale parameter (default: 1.0).
+        :param nag_tau: NAG temperature parameter (default: 2.5).
+        :param nag_alpha: NAG alpha parameter (default: 0.25).
         :return: The denoised video tensors with original input shapes [C_out, F, H / 8, W / 8].
         """
         if self.model_type in ["i2v", "flf2v"]:
@@ -743,6 +832,9 @@ class WanModel(ModelMixin, ConfigMixin):
             freqs=self.freqs,
             context=context,
             context_lens=context_lens,
+            nag_scale=nag_scale,
+            nag_tau=nag_tau,
+            nag_alpha=nag_alpha,
         )
 
         for block in self.blocks:

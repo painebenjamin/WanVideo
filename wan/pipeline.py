@@ -412,10 +412,14 @@ class WanPipeline(DiffusionPipeline):
         tile_horizontal: bool,
         tile_vertical: bool,
         use_cfg_alpha: bool,
+        nag_scale: float = 1.0,
+        nag_tau: float = 2.5,
+        nag_alpha: float = 0.25,
     ) -> torch.Tensor:
         """
         Predict noise at a given timestep
         """
+        do_normalized_attn_guidance = nag_scale > 1.0
         use_multidiffusion = (window_size and window_stride) or (
             tile_size and tile_stride
         )
@@ -654,6 +658,10 @@ class WanPipeline(DiffusionPipeline):
                         l[:, start:end, top:bottom, left:right] for l in latents
                     ]
 
+                if do_normalized_attn_guidance:
+                    # Repeat the latents once
+                    latent_model_input = latent_model_input * 2
+
                 if do_classifier_free_guidance and uncond is not None:
                     noise_pred_cond = self.transformer(
                         latent_model_input,
@@ -662,6 +670,9 @@ class WanPipeline(DiffusionPipeline):
                         seq_len=seq_len,
                         y=y,
                         clip_fea=clip_fea,
+                        nag_scale=nag_scale,
+                        nag_tau=nag_tau,
+                        nag_alpha=nag_alpha,
                     )[0]
                     noise_pred_uncond = self.transformer(
                         latent_model_input,
@@ -670,6 +681,9 @@ class WanPipeline(DiffusionPipeline):
                         seq_len=seq_len,
                         y=y,
                         clip_fea=clip_fea,
+                        nag_scale=nag_scale,
+                        nag_tau=nag_tau,
+                        nag_alpha=nag_alpha,
                     )[0]
 
                     if use_cfg_alpha:
@@ -693,6 +707,9 @@ class WanPipeline(DiffusionPipeline):
                         seq_len=seq_len,
                         y=y,
                         clip_fea=clip_fea,
+                        nag_scale=nag_scale,
+                        nag_tau=nag_tau,
+                        nag_alpha=nag_alpha,
                     )[0]
 
                 window_mask = torch.ones_like(noise_pred)
@@ -973,6 +990,10 @@ class WanPipeline(DiffusionPipeline):
         else:
             latent_model_input = latents
 
+            if do_normalized_attn_guidance:
+                # Duplicate the latents for NAG
+                latent_model_input = latent_model_input * 2
+
             if do_classifier_free_guidance and uncond is not None:
                 noise_pred_cond = self.transformer(
                     latent_model_input,
@@ -981,6 +1002,9 @@ class WanPipeline(DiffusionPipeline):
                     seq_len=seq_len,
                     y=y,
                     clip_fea=clip_fea,
+                    nag_scale=nag_scale,
+                    nag_tau=nag_tau,
+                    nag_alpha=nag_alpha,
                 )[0]
                 noise_pred_uncond = self.transformer(
                     latent_model_input,
@@ -989,6 +1013,9 @@ class WanPipeline(DiffusionPipeline):
                     seq_len=seq_len,
                     y=y,
                     clip_fea=clip_fea,
+                    nag_scale=nag_scale,
+                    nag_tau=nag_tau,
+                    nag_alpha=nag_alpha,
                 )[0]
 
                 if use_cfg_alpha:
@@ -1012,6 +1039,9 @@ class WanPipeline(DiffusionPipeline):
                     seq_len=seq_len,
                     y=y,
                     clip_fea=clip_fea,
+                    nag_scale=nag_scale,
+                    nag_tau=nag_tau,
+                    nag_alpha=nag_alpha,
                 )[0]
 
         return noise_pred  # type: ignore[no-any-return]
@@ -1044,6 +1074,9 @@ class WanPipeline(DiffusionPipeline):
         tile_vae: bool = False,
         use_tqdm: bool = True,
         flash_fix: bool = True,
+        nag_scale: float = 1.0,
+        nag_tau: float = 2.5,
+        nag_alpha: float = 0.25,
     ) -> torch.Tensor:
         """
         Generate video frames from the prompt.
@@ -1057,6 +1090,9 @@ class WanPipeline(DiffusionPipeline):
         :param num_inference_steps: Number of inference steps
         :param guidance_scale: Guidance scale
         :param generator: Generator to use for reproducibility
+        :param nag_scale: NAG scale parameter (default: 1.0)
+        :param nag_tau: NAG temperature parameter (default: 2.5)
+        :param nag_alpha: NAG alpha parameter (default: 0.25)
         :return: Video frames [3, T, H, W]
         """
         if video is not None:
@@ -1236,7 +1272,8 @@ class WanPipeline(DiffusionPipeline):
                 tile_stride = tile_stride // spatial_comp
 
         do_classifier_free_guidance = guidance_scale > 1.0
-
+        do_normalized_attn_guidance = nag_scale > 1.0
+                
         # Get timesteps
         timesteps, num_inference_steps = self.retrieve_timesteps(
             num_inference_steps=num_inference_steps,
@@ -1257,14 +1294,23 @@ class WanPipeline(DiffusionPipeline):
         with log_duration("encoding prompt"):
             cond = [self.encode_prompt(prompt).to(self.dtype)]
 
-        if do_classifier_free_guidance:
+        if do_classifier_free_guidance or do_normalized_attn_guidance:
             with log_duration("encoding negative prompt"):
                 uncond = [
                     self.encode_prompt(
                         negative_prompt or self.default_negative_prompt
                     ).to(self.dtype)
                 ]
+
+            if do_normalized_attn_guidance:
+                # NAG will use both conditions in the attention mechanism
+                cond += uncond
+
+            if not do_classifier_free_guidance:
+                # We can use NAG and/or CFG independently
+                uncond = None
         else:
+            # No guidance at all
             uncond = None
 
         # Create noise
@@ -1330,6 +1376,9 @@ class WanPipeline(DiffusionPipeline):
                         tile_vertical=tile_vertical,
                         do_classifier_free_guidance=do_classifier_free_guidance,
                         use_cfg_alpha=use_cfg_alpha,
+                        nag_scale=nag_scale,
+                        nag_tau=nag_tau,
+                        nag_alpha=nag_alpha,
                     )
 
                 temp_x0 = self.scheduler.step(  # type: ignore[attr-defined]
